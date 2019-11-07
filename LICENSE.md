@@ -1,4 +1,5 @@
 MIT License
+===========
 
 Original work Copyright (c) 2015 Marvin Pinto
 Modified work Copyright (c) 2017 Thanh C Pham
