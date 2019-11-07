@@ -1,10 +1,15 @@
 # jenkins-update-ec2-ami
 
+Automate building of the Jenkins EC2 AMI
+
+## Usage
+
 In a Jenkinsfile:
-```
+
+```groovy
 node {
  sh './packer build -color=false jenkins_agent_ami.json'
- sh 'JENKINS_AUTH_USER="packer" JENKINS_AUTH_PASSWORD="SECRETPASSWORD" EC2_CLOUD_INSTANCE=ec2 AMI_PROFILE_NAME="aws-jenkins-agent" AWS_REGION="eu-west-1" python jenkins-update-ec2-ami.py'
+ sh 'JENKINS_API_USERNAME="packer" JENKINS_API_TOKEN="SECRETPASSWORD" python update-ec2-ami.py'
 }
 ```
 
@@ -13,5 +18,7 @@ node {
 
 Detailed instructions: https://blog.grakn.ai/automated-aws-ami-builds-for-jenkins-agents-with-packer-e569630b1f8e
 
-Copied from https://gist.github.com/marvinpinto/a6c9b5119d418a65d489  
-Originated from https://github.com/jenkinsci/ec2-plugin/pull/154
+## Credits
+
+* Copied from https://gist.github.com/marvinpinto/a6c9b5119d418a65d489
+* Originated from https://github.com/jenkinsci/ec2-plugin/pull/154
