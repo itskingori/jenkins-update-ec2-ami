@@ -1,21 +1,22 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
 import requests
 import os
 import boto.ec2
 import sys
 import re
+import time
 
 build_url = os.environ['BUILD_URL']
 jenkins_base_url = os.environ['JENKINS_URL']
-ami_profile_name = os.environ['AMI_PROFILE_NAME']
-jenkins_auth_user = os.environ['JENKINS_AUTH_USER']
-jenkins_auth_password = os.environ['JENKINS_AUTH_PASSWORD']
+jenkins_api_username = os.environ['JENKINS_API_USERNAME']
+jenkins_api_token = os.environ['JENKINS_API_TOKEN']
 jenkins_crumb_header_name = ""
 jenkins_crumb_header_value = ""
 verify_ssl = True
-aws_region = os.getenv('AWS_REGION', 'us-east-1')
-ec2_cloud_instance = os.getenv('EC2_CLOUD_INSTANCE', 'aws_us-east-1')
+aws_region = os.getenv('AWS_REGION', 'eu-west-1')
+ec2_cloud_instance = os.getenv('EC2_CLOUD_INSTANCE', 'JenkinsEC2')
+ami_profile_name = os.getenv('AMI_PROFILE_NAME', 'Ubuntu')
 output_error_string = os.getenv('OUTPUT_ERROR_STRING', 'Error:')
 build_output_text = ""
 
@@ -24,8 +25,8 @@ def get_crumb_url():
     if not request_url.endswith('/'):
         request_url = '%s/' % request_url
     return 'https://%s:%s@%scrumbIssuer/api/json' % (
-            jenkins_auth_user,
-            jenkins_auth_password,
+            jenkins_api_username,
+            jenkins_api_token,
             request_url)
 
 def get_jenkins_crumb():
@@ -51,21 +52,46 @@ def get_jenkins_build_output():
     build_url = build_url.replace('https://', '');
     if not build_url.endswith('/'):
         build_url = '%s/' % build_url
-    jenkins_url = 'https://%s:%s@%slogText/progressiveText' % (
-            jenkins_auth_user,
-            jenkins_auth_password,
-            build_url)
 
-    payload = {'start': '1'}
+    loop = True
+    start = 0
     headers = {jenkins_crumb_header_name: jenkins_crumb_header_value}
-    r = requests.get(jenkins_url, verify=verify_ssl,  headers=headers)
-    if not r.status_code == 200:
-        print 'HTTP POST to Jenkins URL %s resulted in %s' % (jenkins_url, r.status_code)
-        print r.headers
-        print r.text
-        sys.exit(1)
+    while loop:
+        jenkins_url = 'https://%s:%s@%slogText/progressiveText?start=%s' % (
+            jenkins_api_username,
+            jenkins_api_token,
+            build_url,
+            start)
+        r = requests.get(jenkins_url, verify=verify_ssl,  headers=headers)
+        if not r.status_code == 200:
+            print 'HTTP POST to Jenkins URL %s resulted in %s' % (jenkins_url, r.status_code)
+            print r.headers
+            print r.text
+            sys.exit(1)
 
-    return r.text
+        # The X-Text-Size is confusing but it's more of a pointer than a size
+        # thing. So we'll name the variable appropriately here to avoid
+        # confusion.
+        next_start = r.headers.get('X-Text-Size')
+        more_data = r.headers.get('X-More-Data')
+
+        print "Fetched logs ... start: %s, next-start: %s, more-data: %s" % (start, next_start, more_data)
+
+        if start != next_start:
+            build_output_text += r.text
+        start = next_start
+
+        regex = re.compile(r'(.*%s.*)' % "=== Script Configuration ===", re.MULTILINE)
+        matches = [m.groups() for m in regex.finditer(r.text)]
+        if matches:
+            print "Fetched all the packer build output  -- moving on"
+            loop = False
+        else:
+            loop = more_data
+
+        time.sleep(5)
+
+    return build_output_text
 
 def get_error_lines(build_output):
     retval = ""
@@ -85,6 +111,7 @@ def get_packer_ami_id(build_output):
     regex = re.compile(r'.*amazon-ebs: AMIs were created.*\n.*(ami-.*)$', re.MULTILINE)
     matches = [m.groups() for m in regex.finditer(build_output)]
     for m in matches:
+        print "Matched %s in build output" % m[0].strip()
         return m[0].strip()
 
 def delete_ami(ami_id):
@@ -92,12 +119,12 @@ def delete_ami(ami_id):
     ec2_conn.deregister_image(ami_id, delete_snapshot=True)
 
 def get_groovy_url():
-    groovy_url = jenkins_base_url.replace('https://', '');
+    groovy_url = jenkins_base_url.replace('https://', '')
     if not groovy_url.endswith('/'):
         groovy_url = '%s/' % groovy_url
     return 'https://%s:%s@%sscriptText' % (
-            jenkins_auth_user,
-            jenkins_auth_password,
+            jenkins_api_username,
+            jenkins_api_token,
             groovy_url)
 
 def get_jenkins_ami_id():
@@ -156,11 +183,7 @@ def update_jenkins_ami_id(ami_id):
         print r.text
         sys.exit(1)
 
-    if ami_id:
-        return r.text.strip() == "yes"
-    else:
-        print 'AMI ID is not present. Not updating Jenkins'
-        return False
+    return r.text.strip() == "yes"
 
 def main():
     # Very high level overview of how this is supposed to work:
@@ -174,23 +197,39 @@ def main():
     #       - Delete the old AMI in AWS
     #       - Pass the build
 
+    print "=== Script Configuration ==="
+    print "build_url: %s" % build_url
+    print "jenkins_base_url: %s" % jenkins_base_url
+    print "ami_profile_name: %s" % ami_profile_name
+    print "aws_region: %s" % aws_region
+    print "ec2_cloud_instance: %s" % ec2_cloud_instance
+
     get_jenkins_crumb()
 
+    print "=== Script Results ==="
+
+    # Check if there are any errors in the build output and get the ID of the
+    # AMI that we just built with Packer from the build output
     error_lines = get_error_lines(get_jenkins_build_output())
     packer_ami_id = get_packer_ami_id(get_jenkins_build_output())
-
     if error_lines:
         print error_lines
         print "Deleting newly created AMI %s" % packer_ami_id
         delete_ami(packer_ami_id)
         sys.exit(1)
+    if not packer_ami_id:
+        print "Could not find the AMI we just built, unable to continue"
+        sys.exit(1)
+    print "Packer AMI ID set to: %s" % packer_ami_id
 
+    # Get the AMI currently set on Jenkins right now (that we want to replace)
     old_jenkins_ami_id = get_jenkins_ami_id()
     if not old_jenkins_ami_id:
         print "Could not find (current) Jenkins AMI ID -- moving on"
 
-    update_success = update_jenkins_ami_id(packer_ami_id)
+    print "New ID: %s, Old ID: %s" % (packer_ami_id, old_jenkins_ami_id)
 
+    update_success = update_jenkins_ami_id(packer_ami_id)
     if update_success:
         print "Jenkins AMI has been updated to %s" % packer_ami_id
     else:
